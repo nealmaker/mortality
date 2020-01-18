@@ -1,6 +1,7 @@
 library("tidyverse")
+library("survival")
 library("caret")
-library("Rborist")
+library("ranger")
 library("randomForest")
 library("Rborist")
 
@@ -13,36 +14,66 @@ load(temp)
 # remove trees that were cut and unwanted variables
 nf_fia <- nf_fia %>%
   filter(status_change != "cut") %>%
-  mutate(died = as.factor(if_else(status_change == "died", 1, 0))) %>% 
-  select(died, spp, dbh_s, cr_s, ba_mid, bal_s, 
-         forest_type_s, lat, lon) 
+  mutate(died = ifelse(status_change == "died", 1, 0)) %>% 
+  select(died, interval, spp, dbh_s, cr_s, crown_class_s, tree_class_s,
+         ba_s, bal_s, forest_type_s, stocking_s, landscape, 
+         site_class, slope, aspect, lat, lon, elev, plot) %>% 
+  rename(dbh = dbh_s, cr = cr_s, crown_class = crown_class_s,
+         tree_class = tree_class_s, ba = ba_s, bal = bal_s,
+         forest_type = forest_type_s, stocking = stocking_s)
+
+unlink(temp)
+
+nf_fia <- nf_fia %>% 
+  mutate(start = ifelse(died == 1, 0, interval),
+         end = ifelse(died == 1, interval, Inf)) %>% 
+  select(-died, -interval)
+
 
 # test set is 20% of full dataset
 test_size <- .2
 
+# define test set based on plots (to make it truely independent)
 set.seed(10)
-index <- createDataPartition(nf_fia$died, times = 1, p = test_size, list = FALSE)
+test_plots <- sample(unique(nf_fia$plot), 
+                     size = round(test_size*length(unique(nf_fia$plot))), 
+                     replace = FALSE)
 
+index <- which(nf_fia$plot %in% test_plots)
 train <- nf_fia[-index,]
 test <- nf_fia[index,]
+train_sub <- train[sample(1:nrow(train), 200),]
+
+#Surv now gives an interval censored object, I think,
+#but ranger doesn't seem to use it correctly
+#or should I make ranges that go from interval to infinity for live trees?
+#time = 0 or interval; time2 = interval or infinity; event = 3 for all
+x <- select(train, -plot, -start, -end)
+y <- Surv(rep(0, nrow(train)), time = train$interval, event = train$died)
+
+x_sub <- select(train_sub, -plot, -start, -end)
+y_sub <- Surv(time = train_sub$start, 
+              time2 = train_sub$end, 
+              event = rep(3, nrow(train_sub)), 
+              type = "interval")
 
 
 #####################################################################
 # Preprocess data
 #####################################################################
 
-preproc_mort <- preProcess(train[,-1], method = c("center", "scale", "YeoJohnson"))
-train_tran <- predict(preproc_mort, train)
-test_tran <- predict(preproc_mort, test)
-
-x <- train_tran[,-1]
-y <- train_tran[,1]
-
-# sub-sample for trying different models
-train_tran_sub <- train_tran[sample(nrow(train_tran), 500, replace = F),]
-
-x_sub <- train_tran_sub[,-1]
-y_sub <- train_tran_sub[,1]
+# preproc_mort <- preProcess(train[,-1], method = c("center", "scale", "YeoJohnson"))
+# train_tran <- predict(preproc_mort, train)
+# test_tran <- predict(preproc_mort, test)
+# 
+# x <- train_tran[,-1]
+# y <- train_tran[,1]
+# 
+# # sub-sample for trying different models
+# train_tran_sub <- train_tran[sample(nrow(train_tran), 500, replace = F),]
+# 
+# x_sub <- train_tran_sub[,-1]
+# y_sub <- train_tran_sub[,1]
 
 #####################################################################
 # Train model
@@ -51,20 +82,49 @@ y_sub <- train_tran_sub[,1]
 # Model testing
 ranger_mod_test <- train(x_sub, y_sub,
                          method = "ranger",
+                         preProcess = c("center", "scale", "YeoJohnson"),
                          num.trees = 50,
-                         tuneGrid = data.frame(mtry = seq(2, 8, by = 2),
-                                               splitrule = rep("gini", 4),
-                                               min.node.size = rep(10, 4)))
+                         tuneGrid = data.frame(.mtry = seq(2, 14, by = 4),
+                                               .splitrule = rep("logrank", 4),
+                                               .min.node.size = rep(3, 4)),
+                         importance = 'impurity')
+
+# this is set up as right-censored, should be interval;
+# looks like ranger only works for right censored data though...
+# chf shows prob of death at various times for each observation
+# and unique.death.times are the times that correspond to those probs.
+ranger_test <- ranger(y_sub ~ spp + dbh + cr, data = train_sub)
 
 randomForest_mod_test <- train(x_sub, y_sub,
                                method = "rf",
+                               preProcess = c("center", "scale", "YeoJohnson"),
+                               ntree = 200,
                                importance = T,
-                               tuneGrid = data.frame(mtry = seq(2, 8, by = 2)))
+                               tuneGrid = data.frame(mtry = seq(2, 14, by = 4)))
 
-Rborist_mod_test <- train(x_sub, y_sub,
-                          method = "Rborist",
-                          tuneGrid = data.frame(predFixed = seq(2, 8, by = 2),
-                                                minNode = rep(2, 4)))
+# "rf" works on subsample, but "cannot allocate vector of 2.3 Gb" 
+# with full (80%) training set. Try decreasing size of training set.
+# still fails at 60% training set "cannot allocate ... 1.7 Gb" (>24 hrs)
+# Could also reduce ntree to 200 (default is 500), or maybe
+# increase R's memory limit (eg: memory.limit(size=56000))
+
+memory.limit(size=56000)
+mort_model_full <- train(x, y,
+                         method = "ranger",
+                         preProcess = c("center", "scale", "YeoJohnson"),
+                         trControl = trainControl(classProbs = T),
+                         num.trees = 2000,
+                         tuneGrid = data.frame(.mtry = seq(2, 14, by = 4),
+                                               .splitrule = rep("gini", 4),
+                                               .min.node.size = rep(10, 4)),
+                         importance = 'impurity')
+
+# causes R to abort!
+# Rborist_mod_test <- train(x_sub, y_sub,
+#                           method = "Rborist",
+#                           preProcess = c("center", "scale", "YeoJohnson"),
+#                           tuneGrid = data.frame(predFixed = seq(2, 8, by = 2),
+#                                                 minNode = rep(2, 4)))
 
 
 # Final model
@@ -108,10 +168,7 @@ df <- data.frame(spp = factor(c("hard maple", "paper birch"),
                  lat = c(44.7, 44.7),
                  lon = c(-73.6, -73.6))
 
-df_trans <- predict(preproc_mort, newdata = df)
-
-# Works well, but predicts "1" for lived & "2" for died
-predict(mort_model, newdata = df_trans)
+predict(mort_model_full, newdata = df, type = "prob")
 
 #this will give a probability of death (over next 5ish years)
 predict(mort_model, newdata = df_trans)$census[,2]/500
