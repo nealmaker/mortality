@@ -14,7 +14,8 @@ load(temp)
 # remove trees that were cut and unwanted variables
 nf_fia <- nf_fia %>%
   filter(status_change != "cut") %>%
-  mutate(died = ifelse(status_change == "died", 1, 0)) %>% 
+  mutate(died = as.character(status_change),
+         died = as.factor(died)) %>% 
   select(died, interval, spp, dbh_s, cr_s, crown_class_s, tree_class_s,
          ba_s, bal_s, forest_type_s, stocking_s, landscape, 
          site_class, slope, aspect, lat, lon, elev, plot) %>% 
@@ -24,10 +25,11 @@ nf_fia <- nf_fia %>%
 
 unlink(temp)
 
-nf_fia <- nf_fia %>% 
-  mutate(start = ifelse(died == 1, 0, interval),
-         end = ifelse(died == 1, interval, Inf)) %>% 
-  select(-died, -interval)
+# # Converts outcome to intervals for interval-censored model:
+# nf_fia <- nf_fia %>% 
+#   mutate(start = ifelse(died == 1, 0, interval),
+#          end = ifelse(died == 1, interval, Inf)) %>% 
+#   select(-died, -interval)
 
 
 # test set is 20% of full dataset
@@ -48,44 +50,36 @@ train_sub <- train[sample(1:nrow(train), 200),]
 #but ranger doesn't seem to use it correctly
 #or should I make ranges that go from interval to infinity for live trees?
 #time = 0 or interval; time2 = interval or infinity; event = 3 for all
-x <- select(train, -plot, -start, -end)
-y <- Surv(rep(0, nrow(train)), time = train$interval, event = train$died)
-
-x_sub <- select(train_sub, -plot, -start, -end)
-y_sub <- Surv(time = train_sub$start, 
-              time2 = train_sub$end, 
-              event = rep(3, nrow(train_sub)), 
-              type = "interval")
-
-
-#####################################################################
-# Preprocess data
-#####################################################################
-
-# preproc_mort <- preProcess(train[,-1], method = c("center", "scale", "YeoJohnson"))
-# train_tran <- predict(preproc_mort, train)
-# test_tran <- predict(preproc_mort, test)
+# x <- select(train, -plot, -start, -end)
+# y <- Surv(rep(0, nrow(train)), time = train$interval, event = train$died)
 # 
-# x <- train_tran[,-1]
-# y <- train_tran[,1]
-# 
-# # sub-sample for trying different models
-# train_tran_sub <- train_tran[sample(nrow(train_tran), 500, replace = F),]
-# 
-# x_sub <- train_tran_sub[,-1]
-# y_sub <- train_tran_sub[,1]
+# x_sub <- select(train_sub, -plot, -start, -end)
+# y_sub <- Surv(time = train_sub$start, 
+#               time2 = train_sub$end, 
+#               event = rep(3, nrow(train_sub)), 
+#               type = "interval")
+
+x <- select(train, -died, -plot)
+y <- train[,1]
+
+x_sub <- select(train_sub, -died, -plot)
+y_sub <- train_sub[,1]
+
 
 #####################################################################
 # Train model
 #####################################################################
 
 # Model testing
+# This one needs y to be a factor with two levels (not named "0" and "1")
+# to predict class probabilities: predict(model, newdata, type = "prob")
 ranger_mod_test <- train(x_sub, y_sub,
                          method = "ranger",
                          preProcess = c("center", "scale", "YeoJohnson"),
+                         trControl = trainControl(classProbs = T),
                          num.trees = 50,
                          tuneGrid = data.frame(.mtry = seq(2, 14, by = 4),
-                                               .splitrule = rep("logrank", 4),
+                                               .splitrule = rep("gini", 4),
                                                .min.node.size = rep(3, 4)),
                          importance = 'impurity')
 
@@ -139,6 +133,7 @@ mort_model_2 <- train(x, y,
 mort_model <- Rborist(x = x, y = y, 
                       predFixed = 7,
                       minNode = 2)
+
 
 #####################################################################
 # Results 
