@@ -18,7 +18,8 @@ nf_fia <- nf_fia %>%
          died = as.factor(died)) %>% 
   select(died, interval, spp, dbh_s, cr_s, crown_class_s, tree_class_s,
          ba_s, bal_s, forest_type_s, stocking_s, landscape, 
-         site_class, slope, aspect, lat, lon, elev, plot) %>% 
+         site_class, slope, aspect, lat, lon, elev, ba_ash:`bal_yellow birch`,
+         plot) %>% 
   rename(dbh = dbh_s, cr = cr_s, crown_class = crown_class_s,
          tree_class = tree_class_s, ba = ba_s, bal = bal_s,
          forest_type = forest_type_s, stocking = stocking_s)
@@ -102,7 +103,8 @@ y_sub <- train_sub[,1]
 # Could also reduce ntree to 200 (default is 500), or maybe
 # increase R's memory limit (eg: memory.limit(size=56000))
 
-memory.limit(size=56000)
+#memory.limit(size=56000)
+set.seed(10)
 mort_model_full <- train(x, y,
                          method = "ranger",
                          preProcess = c("center", "scale", "YeoJohnson"),
@@ -139,13 +141,13 @@ mort_model_full <- train(x, y,
 # Results full
 #####################################################################
 
-y_hat_train <- predict(mort_model, newdata = x)
+y_hat_train <- predict(mort_model_full, newdata = x)
 y_hat_train <- if_else(y_hat_train$yPred == 1, 0, 1)
 y_hat_train <- as.factor(y_hat_train)
 
-confusionMatrix(data = y_hat_train, reference = y, positive = "1")
+confusionMatrix(data = y_hat_train, reference = y, positive = "lived")
 
-caret::F_meas(data = y_hat_train, reference = y, positive = "1")
+caret::F_meas(data = y_hat_train, reference = y, positive = "lived")
 
 
 #####################################################################
@@ -221,5 +223,5 @@ varImp(mort_model_op, scale = F)
 #####################################################################
 
 # STOP! Too big to fit on GitHub
-save(mort_model_full, file = "../big-rdas/mort-model-full.rda")
+save(mort_model_full, file = "../big-rdas/mort-model-sppspec.rda")
 save(mort_model_op, file = "../big-rdas/mort-model-op.rda")
